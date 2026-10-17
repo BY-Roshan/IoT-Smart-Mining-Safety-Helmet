@@ -1,0 +1,122 @@
+#include <SoftwareSerial.h>
+#include <TinyGPS++.h>
+
+// --- Pin Definitions ---
+const int GPS_RX_PIN = 4;      // Connect to NEO-6M TX
+const int GPS_TX_PIN = 3;      // Connect to NEO-6M RX
+const int BT_RX_PIN  = 10;     // Connect to HC-06 TXD
+const int BT_TX_PIN  = 11;     // Connect to HC-06 RXD
+
+const int FLAME_PIN  = 5;      // Flame sensor D0 -> Pin 5
+const int GAS_PIN    = A0;     // MQ Gas sensor A0 -> Pin A0
+const int SOS_PIN    = 2;      // Red SOS Button -> Pin 2 and GND
+const int LED_PIN    = 6;      // SOS Indicator LED (+) -> Pin 6
+
+const int GAS_THRESHOLD = 450; // Adjust based on calibration
+
+// State tracking variables
+bool lastSosState     = HIGH;
+bool lastFireState    = HIGH;
+bool lastGasState     = false;
+
+unsigned long lastPrintTime = 0;
+const unsigned long PRINT_INTERVAL = 3000;
+
+SoftwareSerial gpsSerial(GPS_RX_PIN, GPS_TX_PIN);
+SoftwareSerial btSerial(BT_RX_PIN, BT_TX_PIN);
+TinyGPSPlus gps;
+
+void setup() {
+  Serial.begin(9600);
+  btSerial.begin(9600);
+  gpsSerial.begin(9600);
+
+  gpsSerial.listen();
+
+  pinMode(FLAME_PIN, INPUT);
+  pinMode(GAS_PIN, INPUT);
+  pinMode(SOS_PIN, INPUT_PULLUP);
+  pinMode(LED_PIN, OUTPUT);
+  digitalWrite(LED_PIN, LOW);
+
+  btSerial.println("=== SMART MINING HELMET CONNECTED ===");
+}
+
+void loop() {
+  // 1. Read GPS data
+  while (gpsSerial.available() > 0) {
+    gps.encode(gpsSerial.read());
+  }
+
+  // 2. Read current sensor states
+  int  gasValue     = analogRead(GAS_PIN);
+  bool gasDetected  = (gasValue > GAS_THRESHOLD);
+  bool fireDetected = (digitalRead(FLAME_PIN) == LOW); 
+  bool currentSosState = digitalRead(SOS_PIN);
+
+  bool sosNewlyPressed = (currentSosState == LOW && lastSosState == HIGH);
+
+  // 3. Hardware LED Control
+  if (fireDetected || gasDetected || (currentSosState == LOW)) {
+    digitalWrite(LED_PIN, HIGH);
+  } else {
+    digitalWrite(LED_PIN, LOW);
+  }
+
+  // 4. Send Bluetooth Alert when an event triggers
+  if (sosNewlyPressed || (fireDetected && !lastFireState) || (gasDetected && !lastGasState)) {
+    sendEmergencyAlert(fireDetected, gasDetected, true, gasValue);
+  }
+
+  lastSosState  = currentSosState;
+  lastFireState = fireDetected;
+  lastGasState  = gasDetected;
+
+  // 5. Periodic Safe Status Print
+  if (millis() - lastPrintTime >= PRINT_INTERVAL) {
+    lastPrintTime = millis();
+
+    if (!fireDetected && !gasDetected && currentSosState == HIGH) {
+      btSerial.print("[SAFE] Gas: ");
+      btSerial.print(gasValue);
+      btSerial.print(" | Flame: No | SOS: Off | GPS Sats: ");
+      btSerial.println(gps.satellites.value());
+    }
+  }
+}
+
+void sendEmergencyAlert(bool fire, bool gas, bool sos, int gasLevel) {
+  btSerial.println("\n🚨 --- DANGER ALERT --- 🚨");
+
+  if (sos && digitalRead(SOS_PIN) == LOW) {
+    btSerial.println("ALERT TYPE: SOS BUTTON PRESSED BY MINER!");
+  }
+  if (fire) {
+    btSerial.println("ALERT TYPE: FIRE / FLAME DETECTED!");
+  }
+  if (gas) {
+    btSerial.print("ALERT TYPE: HAZARDOUS GAS DETECTED! (Level: ");
+    btSerial.print(gasLevel);
+    btSerial.println(")");
+  }
+
+  if (gps.location.isValid()) {
+    float lat = gps.location.lat();
+    float lng = gps.location.lng();
+
+    btSerial.print("LATITUDE : ");
+    btSerial.println(lat, 6);
+    btSerial.print("LONGITUDE: ");
+    btSerial.println(lng, 6);
+    btSerial.print("MAP LINK : [https://maps.google.com/?q=](https://maps.google.com/?q=)");
+    btSerial.print(lat, 6);
+    btSerial.print(",");
+    btSerial.println(lng, 6);
+  } else {
+    btSerial.print("LOCATION : Searching for GPS lock (Sats: ");
+    btSerial.print(gps.satellites.value());
+    btSerial.println(")");
+  }
+
+  btSerial.println("--------------------------");
+}
